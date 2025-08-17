@@ -202,6 +202,16 @@ class SunBlacklistPlugin(Star):
             logger.error(f"踢出失败: {e}")
             return False
 
+    async def _is_member(self, event: AstrMessageEvent, group_id: str, user_id: str) -> bool:
+        """检查目标是否在群内，失败或不存在均返回 False。"""
+        try:
+            info = await event.bot.get_group_member_info(  # type: ignore[attr-defined]
+                group_id=int(group_id), user_id=int(user_id)
+            )
+            return bool(info)
+        except Exception:
+            return False
+
     # ================== 指令 ==================
     @filter.command("sunos")
     async def sunos_command(self, event: AstrMessageEvent):
@@ -269,11 +279,15 @@ class SunBlacklistPlugin(Star):
             for uid in ids:
                 self._add_blacklist(group_id, uid, reason="手动添加", by_user=str(event.get_sender_id()))
                 if kick_flag:
-                    ok = await self._kick_and_block(event, group_id, uid)
-                    if ok:
-                        msg_list.append(f"{uid} 已加入本地黑名单并踢出")
+                    # 若目标不在群内，避免误报“并踢出”
+                    if not await self._is_member(event, group_id, uid):
+                        msg_list.append(f"{uid} 已加入本地黑名单（不在群内，无需踢出）")
                     else:
-                        msg_list.append(f"{uid} 已加入本地黑名单，但踢出失败(权限不足或不在群内)")
+                        ok = await self._kick_and_block(event, group_id, uid)
+                        if ok:
+                            msg_list.append(f"{uid} 已加入本地黑名单并踢出")
+                        else:
+                            msg_list.append(f"{uid} 已加入本地黑名单，但踢出失败(权限不足或不在群内)")
             if not kick_flag:
                 yield event.plain_result(f"已加入本地黑名单: {', '.join(ids)}")
             else:
