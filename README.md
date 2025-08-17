@@ -17,9 +17,11 @@ sunos 系列子插件：群聊警告/本地黑名单，拦截黑名单进群。
 - 在群内发送：`warn @用户`
 - 在群内发送：`ban @用户`
 - 管理命令：`/sunos bl help|list|add|del`
-  - `/sunos bl list` 查看本地黑名单
+  - `/sunos bl list` 查看本地黑名单（默认前 10 名，带序号）
+    - 分页：`/sunos bl list page <页号>`
   - `/sunos bl add <@用户|QQ号>` 添加到本地黑名单
-  - `/sunos bl del <@用户|QQ号>` 从本地黑名单移除
+  - `/sunos bl del <@用户|QQ号|序号>` 从本地黑名单移除
+    - 纯数字：长度>=6 视为 QQ 号；否则视为列表序号
 
 数据与兼容
 - 数据存储位置：插件目录上级 `data/sunos/sunos_blacklist.db`

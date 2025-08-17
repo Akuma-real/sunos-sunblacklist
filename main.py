@@ -118,6 +118,23 @@ class SunBlacklistPlugin(Star):
             logger.error(f"检查黑名单失败: {e}")
             return False
 
+    def _get_blacklist_record(self, group_id: str, user_id: str) -> tuple[str, str, int, str] | None:
+        """查询单个黑名单记录，返回 (user_id, reason, created_at, by_user)。未找到返回 None。"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "SELECT user_id, COALESCE(reason,''), COALESCE(created_at,0), COALESCE(by_user,'')\n"
+                    "FROM blacklist WHERE group_id=? AND user_id=? LIMIT 1",
+                    (group_id, user_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return (str(row[0]), str(row[1]), int(row[2]), str(row[3]))
+        except Exception as e:
+            logger.error(f"读取黑名单记录失败: {e}")
+            return None
+
     def _add_blacklist(self, group_id: str, user_id: str, reason: str = "", by_user: str = "") -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -129,16 +146,18 @@ class SunBlacklistPlugin(Star):
         except Exception as e:
             logger.error(f"加入黑名单失败: {e}")
 
-    def _remove_blacklist(self, group_id: str, user_id: str) -> None:
+    def _remove_blacklist(self, group_id: str, user_id: str) -> bool:
         try:
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+                cur = conn.execute(
                     "DELETE FROM blacklist WHERE group_id=? AND user_id=?",
                     (group_id, user_id),
                 )
                 conn.commit()
+                return cur.rowcount > 0
         except Exception as e:
             logger.error(f"移除黑名单失败: {e}")
+            return False
 
     def _get_blacklist(self, group_id: str) -> List[tuple[str, str, int, str]]:
         """返回 [(user_id, reason, created_at, by_user), ...]"""
@@ -244,20 +263,42 @@ class SunBlacklistPlugin(Star):
         if sub in ("help", "h", "?"):
             yield event.plain_result(
                 "SunBlacklist 指南:\n"
-                "- /sunos bl list 查看本地黑名单\n"
+                "- /sunos bl list 查看本地黑名单（默认前10名）\n"
+                "  · 分页：/sunos bl list page <页号>（序号为全局编号）\n"
                 "- /sunos bl add <@用户|QQ号> 手动加入本地黑名单\n"
-                "- /sunos bl del <@用户|QQ号> 从本地黑名单移除\n"
+                "  · 示例：/sunos bl add @张三 123456789\n"
+                "- /sunos bl del <@用户|QQ号|序号> 从本地黑名单移除\n"
+                "  · 示例：/sunos bl del 1 3 @张三 123456789\n"
+                "  · 纯数字：长度>=6 视为QQ号；否则视为列表序号\n"
                 "- 也可使用: warn @用户 / ban @用户（仅踢人并维护本地黑名单）"
             )
             return
         elif sub == "list":
             items = self._get_blacklist(group_id)
             if not items:
-                yield event.plain_result("本群黑名单为空")
+                yield event.plain_result("本群黑名单为空。可使用 /sunos bl add <@用户|QQ号> 添加。")
             else:
-                lines = [f"{uid} - {reason or '无原因'}" for uid, reason, _, _ in items[:50]]
-                more = "" if len(items) <= 50 else f"\n...共 {len(items)} 人"
-                yield event.plain_result("本地黑名单列表:\n" + "\n".join(lines) + more)
+                # 分页参数：默认第1页，每页10条
+                per_page = 10
+                page = 1
+                if len(args) >= 5 and args[3].lower() == "page" and args[4].isdigit():
+                    page = max(1, int(args[4]))
+                total = len(items)
+                total_pages = max(1, (total + per_page - 1) // per_page)
+                if page > total_pages:
+                    yield event.plain_result(f"页码超出范围：1-{total_pages}。使用 /sunos bl list page <页号> 切换页。")
+                    return
+                start = (page - 1) * per_page
+                end = min(start + per_page, total)
+                page_items = items[start:end]
+                lines = [
+                    f"{idx}. {uid} - {reason or '无原因'}"
+                    for idx, (uid, reason, _, _)
+                    in enumerate(page_items, start=start + 1)
+                ]
+                footer = f"\n第 {page}/{total_pages} 页，共 {total} 人"
+                hint = "\n序号为全局编号。使用 /sunos bl list page <页号> 查看其他页" if total_pages > 1 else ""
+                yield event.plain_result("本地黑名单列表:\n" + "\n".join(lines) + footer + hint)
             return
         elif sub == "add":
             if not await self._has_admin_priv(event):
@@ -297,15 +338,48 @@ class SunBlacklistPlugin(Star):
             if not await self._has_admin_priv(event):
                 yield event.plain_result("此操作需要管理员权限")
                 return
+            # 解析删除目标：仅支持 @用户、QQ号、序号（纯数字）
             ids = self._get_mentioned_user_ids(event)
-            if len(ids) == 0 and len(args) >= 4:
-                ids = [tok for tok in args[3:] if tok.isdigit()]
+            idx_list: List[int] = []
+            raw_tokens = args[3:] if len(args) >= 4 else []
+            for tok in raw_tokens:
+                t = tok.strip()
+                if t.isdigit():
+                    # 纯数字：长度>=6 视为QQ号，否则视为序号
+                    if len(t) >= 6:
+                        ids.append(t)
+                    else:
+                        idx_list.append(int(t))
+
+            # 将序号映射为具体 QQ 号（基于完整列表，序号为全局编号）
+            invalid_idx: List[int] = []
+            if idx_list:
+                items = self._get_blacklist(group_id)
+                for i in idx_list:
+                    if 1 <= i <= len(items):
+                        ids.append(items[i - 1][0])
+                    else:
+                        invalid_idx.append(i)
+
+            # 去重并过滤空
+            ids = list(dict.fromkeys([i for i in ids if i]))
+
             if not ids:
-                yield event.plain_result("用法: /sunos bl del <@用户|QQ号>")
+                yield event.plain_result("用法: /sunos bl del <@用户|QQ号|序号>")
                 return
+            removed: List[str] = []
+            not_found: List[str] = []
             for uid in ids:
-                self._remove_blacklist(group_id, uid)
-            yield event.plain_result(f"已从本地黑名单移除: {', '.join(ids)}")
+                ok = self._remove_blacklist(group_id, uid)
+                (removed if ok else not_found).append(uid)
+            parts: List[str] = []
+            if removed:
+                parts.append(f"已移除: {', '.join(removed)}")
+            if not_found:
+                parts.append(f"未在黑名单: {', '.join(not_found)}")
+            if invalid_idx:
+                parts.append(f"序号无效: {', '.join(map(str, invalid_idx))}")
+            yield event.plain_result("；".join(parts) if parts else "无有效目标")
             return
         else:
             yield event.plain_result("未知子命令，使用 /sunos bl help 查看帮助")
@@ -385,7 +459,11 @@ class SunBlacklistPlugin(Star):
                         await event.bot.set_group_add_request(  # type: ignore[attr-defined]
                             flag=flag, sub_type="add", approve=False, reason="黑名单用户"
                         )
-                        yield event.plain_result("黑名单用户，已自动拒绝进群")
+                        rec = self._get_blacklist_record(group_id, user_id)
+                        reason_text = (rec[1] if rec and rec[1] else "黑名单用户")
+                        yield event.plain_result(
+                            f"已拒绝黑名单用户 {user_id} 的入群申请（群 {group_id}）。原因：{reason_text}"
+                        )
                     except Exception as e:
                         logger.error(f"自动拒绝进群失败: {e}")
                 return
@@ -406,19 +484,31 @@ class SunBlacklistPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1)
     async def handle_dot_prefix(self, event: AstrMessageEvent):
-        """兼容 .sunos 前缀的 bl 子命令。"""
+        """兼容部分 . 前缀命令：.sunos bl、.warn、.ban"""
         try:
             msg = event.message_str.strip()
-            if not msg.startswith(".sunos"):
+            if not msg.startswith("."):
                 return
             if not event.get_group_id():
                 return
-            args = msg.split()
-            if len(args) >= 2 and args[0].endswith("sunos") and args[1] == "bl":
-                async for res in self._handle_bl_commands(event, args):
+            # .sunos bl 子命令
+            if msg.startswith(".sunos"):
+                args = msg.split()
+                if len(args) >= 2 and args[0].endswith("sunos") and args[1] == "bl":
+                    async for res in self._handle_bl_commands(event, args):
+                        yield res
+                return
+            # .warn 与 .ban 兼容触发
+            if msg.startswith(".warn"):
+                async for res in self.cmd_warn(event):
                     yield res
+                return
+            if msg.startswith(".ban"):
+                async for res in self.cmd_ban(event):
+                    yield res
+                return
         except Exception as e:
-            logger.error(f".sunos bl 关键词匹配处理失败: {e}")
+            logger.error(f". 前缀命令匹配处理失败: {e}")
 
     async def terminate(self):
         logger.info("SunBlacklist 插件 v1.0.0 已卸载")
