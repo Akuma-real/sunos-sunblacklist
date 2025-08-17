@@ -1,9 +1,26 @@
-# helloworld
+# SunBlacklist
 
-AstrBot 插件模板
+sunos 系列子插件：群聊警告/本地黑名单，拦截黑名单进群。
 
-A template plugin for AstrBot plugin feature
+功能
+- warn @用户：管理员对成员进行警告；达到 2 次自动踢出并加入本地黑名单
+- ban @用户：管理员立即踢出并加入本地黑名单
+- 成员主动退群后，自动加入本地黑名单，后续进群申请将被拒绝
+- 拦截入群申请事件，若在本地黑名单中则自动以“黑名单用户”为由拒绝
+  
+说明（平台行为）
+- 本插件仅维护“本地黑名单”，不会将成员加入平台（QQ 群）层面的“拒绝再加群/群黑名单”。
+- 当命令触发踢出时，仅执行踢人操作（`reject_add_request=False`）。
+- 黑名单用户再次申请进群时，将自动通过接口直接拒绝，并给出理由“黑名单用户”。
 
-# 支持
+用法
+- 在群内发送：`warn @用户`
+- 在群内发送：`ban @用户`
+- 管理命令：`/sunos bl help|list|add|del`
+  - `/sunos bl list` 查看本地黑名单
+  - `/sunos bl add <@用户|QQ号>` 添加到本地黑名单
+  - `/sunos bl del <@用户|QQ号>` 从本地黑名单移除
 
-[帮助文档](https://astrbot.app)
+数据与兼容
+- 数据存储位置：插件目录上级 `data/sunos/sunos_blacklist.db`
+- 与 `sunos-sunwelcome` 相同的事件接入风格，可并行使用
